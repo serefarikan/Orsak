@@ -92,7 +92,7 @@ let ``the effect is not executed again on if cond is not matched on retryIf`` ()
 [<Fact>]
 let ``recover is never run on success`` () = task {
     let! result =
-        (eff { do! Task.Yield() })
+        eff { do! Task.Yield() }
         |> Effect.recover (fun _ -> failwith "Never run")
         |> Effect.run ()
 
@@ -104,7 +104,7 @@ let ``recover is run once on error`` () = task {
     let mutable counter = 0
 
     let! result =
-        (eff { return! Error "I am Error" })
+        eff { return! Error "I am Error" }
         |> Effect.recover (fun _ -> counter <- counter + 1)
         |> Effect.run ()
 
@@ -115,7 +115,7 @@ let ``recover is run once on error`` () = task {
 [<Fact>]
 let ``tryRecovery is never run on success`` () = task {
     let! result =
-        (eff { do! Task.Yield() })
+        eff { do! Task.Yield() }
         |> Effect.tryRecover (fun _ -> failwith "Never run")
         |> Effect.run ()
 
@@ -127,7 +127,7 @@ let ``tryRecover is run once on error`` () = task {
     let mutable counter = 0
 
     let! result =
-        (eff { return! Error "I am Error" })
+        eff { return! Error "I am Error" }
         |> Effect.tryRecover (fun _ ->
             counter <- counter + 1
             Ok())
@@ -141,7 +141,7 @@ let ``tryRecover is run once on error`` () = task {
 [<Fact>]
 let ``onError is never run on success`` () = task {
     let! result =
-        (eff { do! Task.Yield() })
+        eff { do! Task.Yield() }
         |> Effect.onError (fun _ -> failwith "Never run")
         |> Effect.run ()
 
@@ -153,11 +153,11 @@ let ``onError is run once on error`` () = task {
     let mutable counter = 0
 
     let! result =
-        (eff {
+        eff {
             do! Task.Yield()
 
             return! Error "I am Error"
-        })
+        }
         |> Effect.onError (fun _ -> eff {
             counter <- counter + 1
             return ()

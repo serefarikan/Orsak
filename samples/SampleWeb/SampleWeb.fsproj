@@ -5,19 +5,27 @@
     <FileVersion>0.1.0.0</FileVersion>
     <InformationalVersion>0.1.0-beta.28+Branch.main.Sha.de0812bbd4257b3581e40b032397d238a9bfe3a9</InformationalVersion>
     <Version>0.1.0-beta0028</Version>
+	  <NoWarn>57</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="BackgroundWorker.fs" />
     <Compile Include="Models.fs" />
+    <Compile Include="Transactional.fs" />
     <Compile Include="Effects.fs" />
-    <Compile Include="Routes.fs" />
+    <Compile Include="Application.fs" />
+    <Compile Include="MinimalApi.fs" />
+    <Compile Include="EndpointRouting.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Dapper" Version="2.0.123" />
     <PackageReference Include="Fleece" Version="0.10.0" />
     <PackageReference Include="Fleece.SystemTextJson" Version="0.10.0" />
     <PackageReference Include="FSharpPlus" Version="1.4.0" />
     <PackageReference Include="Giraffe" Version="6.0.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="7.0.4" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="7.0.4" />
+    <PackageReference Include="Rebus" Version="7.1.0" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Orsak\Orsak.fsproj" />

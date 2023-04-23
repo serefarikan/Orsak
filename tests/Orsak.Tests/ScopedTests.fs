@@ -1,58 +1,96 @@
 ﻿namespace Orsak.Tests
 
 open System
+open System.Security.Cryptography
+open Microsoft.FSharp.NativeInterop
+open System.Runtime.InteropServices
+open Orsak.ScopeAware
 
+//#nowarn "9"
 #nowarn "57"
 
 open System.Data.Common
-open System.Threading.Tasks
 open FSharp.Control
 open Microsoft.Data.Sqlite
 
 open Orsak
 open Orsak.Scoped
+open Orsak.Effects
 open Xunit
+open Swensen.Unquote
+
+type RNGProvider =
+    abstract member Gen: RandomNumberGenerator
+
+module RandomNumberGenerator =
+    let getBytes (x: byte array) =
+        Effect.Create(fun (provider: #RNGProvider) -> provider.Gen.GetBytes(x))
+
+    //let getInt32 (fromInclusive: Int32) (toExclusive: Int32) =
+    //    Effect.Create(fun (provider: #RNGProvider) ->
+    //        if fromInclusive >= toExclusive then invalidArg "" ""
+
+    //        let range = uint toExclusive - uint fromInclusive  - 1u
+    //        let mutable mask = range
+    //        if range = 0u then
+    //            fromInclusive
+    //        else
+    //            mask <- mask ||| (mask >>> 1)
+    //            mask <- mask ||| (mask >>> 2)
+    //            mask <- mask ||| (mask >>> 4)
+    //            mask <- mask ||| (mask >>> 8)
+    //            mask <- mask ||| (mask >>> 16)
+
+    //            let a = NativePtr.stackalloc<uint> 1 |> NativePtr.toVoidPtr
+    //            let resultSpan = Span<uint>(a, 1)
+
+    //            let mutable result = Unchecked.defaultof<uint>
+
+    //            do provider.Gen.GetBytes(MemoryMarshal.AsBytes resultSpan)
+    //            result <- mask &&& resultSpan[0]
+    //            while result > range do
+    //                do provider.Gen.GetBytes(MemoryMarshal.AsBytes resultSpan)
+    //                result <- mask &&& resultSpan[0]
+
+    //            int32 (result + uint fromInclusive)
+    //    )
 
 type IClock =
-    abstract member UtcNow: unit -> System.DateTimeOffset
+    abstract member UtcNow: unit -> DateTimeOffset
 
 type IClockProvider =
     abstract member Clock: IClock
 
-type Clock =
-    static member utcNow() =
+module Clock =
+    let utcNow () =
         Effect.Create(fun (provider: #IClockProvider) -> provider.Clock.UtcNow())
 
-
-
-type DbTransactional(tran: DbTransaction) =
-    member val Connection = tran.Connection
-
-    interface TransactionScope with
-        member this.CommitAsync() : Task = tran.CommitAsync()
-
-        member this.DisposeAsync() : ValueTask = vtask {
-            do! tran.DisposeAsync()
-            do! this.Connection.DisposeAsync()
-        }
-
 type TestProvider() =
+    let rng = RandomNumberGenerator.Create()
+
     interface ExceptionHandler<string> with
         member this.Handle e = e.ToString()
 
     interface IClockProvider with
         member this.Clock =
             { new IClock with
-                member this.UtcNow() = System.DateTimeOffset.UtcNow
+                member this.UtcNow() = DateTimeOffset.UtcNow
             }
 
+    interface RNGProvider with
+        member this.Gen: RandomNumberGenerator = 
+            rng
+
     interface TransactionScopeProvider<DbTransactional> with
-        member this.Scope() : ValueTask<DbTransactional> = vtask {
-            let conn: DbConnection = new SqliteConnection("Data Source=test.db;Cache=Shared")
-            do! conn.OpenAsync()
-            let! tran = conn.BeginTransactionAsync()
-            return DbTransactional(tran)
-        }
+        member this.BeginScope() =
+            vtask {
+                let conn: DbConnection = new SqliteConnection("Data Source=test.db;Cache=Shared")
+                do! conn.OpenAsync()
+                let! tran = conn.BeginTransactionAsync()
+                return DbTransactional(tran)
+            }
+
+
 
 type Scoped() =
     do
@@ -62,61 +100,65 @@ type Scoped() =
         let command = conn.CreateCommand()
 
         command.CommandText <-
-            """
-                                CREATE TABLE TestData (
-	                                pkey INTEGER PRIMARY KEY AUTOINCREMENT,
-	                                data TEXT NOT NULL
-                                );"""
+            """CREATE TABLE TestData (
+	              pkey INTEGER PRIMARY KEY AUTOINCREMENT,
+	              data TEXT NOT NULL
+                );"""
 
         command.ExecuteNonQuery() |> ignore
         tran.Commit()
         ()
 
-
-    let commitEff = TransactionalEffectBuilder<DbTransactional>()
-
     //Mostly explores what is possible with this api
     //all the async usage is wasted with SQLite, but can be valuable with other providers.
-    let read () =
-        mkEffect (fun (trans: DbTransactional) -> vtask {
-            let command = trans.Connection.CreateCommand()
+    let read (): Transaction<_, _>  =
+        mkEffect (fun (trans: DbTransactional) ->
+            vtask {
+                let command = trans.Connection.CreateCommand()
 
-            command.CommandText <-
-                """
-                    SELECT pkey, data FROM TestData
-                """
+                command.CommandText <- "SELECT pkey, data FROM TestData"
 
-            let list = ResizeArray()
+                let list = ResizeArray()
 
-            try
-                use! reader = command.ExecuteReaderAsync()
+                try
+                    use! reader = command.ExecuteReaderAsync()
 
-                while reader.ReadAsync() do
-                    let id = reader.GetInt32(0)
-                    let data = reader.GetString(1)
-                    list.Add((id, data))
+                    while reader.ReadAsync() do
+                        let id = reader.GetInt32(0)
+                        let data = reader.GetString(1)
+                        list.Add((id, data))
 
-                return Ok list
-            with e ->
-                return Error(e.ToString())
-        })
+                    return Ok list
+                with e ->
+                    return Error(e.ToString())
+            })
 
-    let insert () =
-        mkEffect (fun (trans: DbTransactional) -> vtask {
-            let command = trans.Connection.CreateCommand()
+    let insert (): Transaction<unit, _>  =
+        mkEffect (fun (trans: DbTransactional) ->
+            vtask {
+                let command = trans.Connection.CreateCommand()
 
-            command.CommandText <-
-                """
-                    INSERT INTO TestData (data) VALUES (@data)
-                """
+                command.CommandText <-
+                    """
+                        INSERT INTO TestData (data) VALUES (@data)
+                    """
 
-            let par = command.CreateParameter()
-            par.ParameterName <- "@data"
-            par.Value <- "test"
-            command.Parameters.Add par |> ignore
-            command.ExecuteNonQuery() |> ignore
-            return Ok()
-        })
+                let par = command.CreateParameter()
+                par.ParameterName <- "@data"
+                par.Value <- "test"
+                command.Parameters.Add par |> ignore
+                command.ExecuteNonQuery() |> ignore
+                return Ok()
+            })
+
+    let scopeAware = ScopeAwareEffectBuilder<DbTransactional>()
+
+    let deferCommit () = scopeAware {
+            let! list = read ()
+            Assert.Empty list
+            let! _now = Clock.utcNow ()
+            return 1
+        }
 
     let run e =
         Effect.runOrFail<TestProvider, _, string> (TestProvider()) e
@@ -135,6 +177,7 @@ type Scoped() =
         commitEff {
             let! list = read ()
             Assert.Empty list
+            let! test = deferCommit()
             let! _now = Clock.utcNow ()
             return 1
         }
@@ -155,13 +198,14 @@ type Scoped() =
 
     [<Fact>]
     let ``Connection tests 3`` () =
-        let insertWithError () = commitEff {
-            do! insert ()
-            let! list = read ()
-            let value = Assert.Single(list)
-            Assert.Equal((1, "test"), value)
-            return! Error "expected"
-        }
+        let insertWithError () =
+            commitEff {
+                do! insert ()
+                let! list = read ()
+                let value = Assert.Single(list)
+                Assert.Equal((1, "test"), value)
+                return! Error "expected"
+            }
 
         let read () = commitEff { return! read () }
 
@@ -190,11 +234,12 @@ type Scoped() =
 
     [<Fact>]
     let ``Connection tests 5`` () =
-        let insertAndRead () = commitEff {
-            do! insert ()
-            let! list = read ()
-            return list.Count
-        }
+        let insertAndRead () =
+            commitEff {
+                do! insert ()
+                let! list = read ()
+                return list.Count
+            }
 
         eff {
             let! a = insertAndRead ()

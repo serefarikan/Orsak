@@ -3,11 +3,12 @@ open BenchmarkDotNet.Running
 
 open Orsak
 open System.Threading.Tasks
+open FSharp.Control
 
 #nowarn "3511"
 
 module Old =
-    open FSharp.Control
+
     let inline par (eff: Effect<'r, 'a, 'e> seq) =
         mkEffect (fun rEnv -> vtask {
             let! results =
@@ -57,16 +58,16 @@ type SyncBenchmarks() =
 
 module AsyncBenchmarks =
     let yieldEffect : Effect<unit, int, unit> =
-        eff {
+        mkEffect(fun () -> vtask {
             do! Task.Yield()
-            return 1
-        }
+            return Ok 1
+        })
 
     let asyncEffect : Effect<unit, int, unit> =
-        eff {
+        mkEffect(fun () -> vtask {
             do! Task.Delay 100
-            return 1
-        }
+            return Ok 1
+        })
 
 
 

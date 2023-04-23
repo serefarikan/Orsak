@@ -9,6 +9,9 @@ open System.Threading.Tasks
 open System.Threading.Channels
 open System
 
+#nowarn "1204"
+#nowarn "57"
+
 [<AutoOpen>]
 module Helpers =
 
@@ -155,7 +158,6 @@ module BuilderTests =
             return i =! 15
         }
         |> run
-
 
     [<Fact>]
     let ``Builder should support and! in an asynchronous fashion`` () =

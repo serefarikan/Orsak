@@ -33,6 +33,7 @@
 		<Compile Include="EffectBuilder.fs" />
 		<Compile Include="Effect.fs" />
 		<Compile Include="ScopedEffect.fs" />
+		<Compile Include="Effects\Database.fs" />
 		<Compile Include="EffSeq.fs" />
 	</ItemGroup>
 	<ItemGroup>

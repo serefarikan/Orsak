@@ -27,6 +27,8 @@ type DbTransactional(tran: DbTransaction) =
 
 type Transaction<'a, 'err> = Effect<DbTransactional, 'a, 'err>
 
+type EnlistedTransaction<'r, 'a, 'err> = Effect<'r * DbTransactional, 'a, 'err>
+
 [<AutoOpen>]
 module Builder =
     let commitEff = TransactionalEffectBuilder<DbTransactional>()

@@ -100,7 +100,7 @@ type Scoped() =
         let command = conn.CreateCommand()
 
         command.CommandText <-
-            """CREATE TABLE TestData (
+            """CREATE TABLE IF NOT EXISTS TestData (
 	              pkey INTEGER PRIMARY KEY AUTOINCREMENT,
 	              data TEXT NOT NULL
                 );"""
@@ -153,12 +153,7 @@ type Scoped() =
 
     let scopeAware = ScopeAwareEffectBuilder<DbTransactional>()
 
-    let deferCommit () = scopeAware {
-            let! list = read ()
-            Assert.Empty list
-            let! _now = Clock.utcNow ()
-            return 1
-        }
+
 
     let run e =
         Effect.runOrFail<TestProvider, _, string> (TestProvider()) e
@@ -172,23 +167,38 @@ type Scoped() =
             else
                 failwith $"Got error %O{es} when expecting error %O{error}")
 
+
     [<Fact>]
-    let ``Connection tests`` () =
+    let ``We can bind a scoped effect and then a regular effect with proper overload resolution`` () =
         commitEff {
             let! list = read ()
-            Assert.Empty list
-            let! test = deferCommit()
+
             let! _now = Clock.utcNow ()
-            return 1
+
+            Assert.Empty(list)
+            return ()
         }
         |> run
 
     [<Fact>]
-    let ``Connection tests 2`` () =
+    let ``We can bind a regular effect and then a scoped effect with proper overload resolution`` () =
+        commitEff {
+            let! _now = Clock.utcNow ()
+
+
+            let! list = read ()
+
+            Assert.Empty(list)
+            return ()
+        }
+        |> run
+    [<Fact>]
+    let ``We can interleave effects in a commitEff with proper overload resolution`` () =
         commitEff {
             do! insert ()
             let! _now = Clock.utcNow ()
             let! list = read ()
+
             let value = Assert.Single(list)
             Assert.Equal((1, "test"), value)
             return 1
@@ -197,7 +207,7 @@ type Scoped() =
 
 
     [<Fact>]
-    let ``Connection tests 3`` () =
+    let ``A failed commitEff does not execute its commit`` () =
         let insertWithError () =
             commitEff {
                 do! insert ()
@@ -221,7 +231,7 @@ type Scoped() =
 
 
     [<Fact>]
-    let ``Connection tests 4`` () =
+    let ``We can see the scoped results in commitEff`` () =
         commitEff {
             do! insert ()
 
@@ -233,9 +243,90 @@ type Scoped() =
         |> run
 
     [<Fact>]
-    let ``Connection tests 5`` () =
+    let ``Scope aware effects read with the surrounding scope`` () =
+        let deferCommit () = scopeAware {
+            let! _now = Clock.utcNow ()
+
+            let! list = read ()
+            let value = Assert.Single(list)
+            Assert.Equal((1, "test"), value)
+            return ()
+        }
+
+        commitEff {
+            do! insert ()
+            do! deferCommit()
+            let! _now = Clock.utcNow ()
+            return 1
+        }
+        |> run
+
+    [<Fact>]
+    let ``Scope aware effects can fail the surrounding scope`` () =
+        let deferCommit () = scopeAware {
+            let! _now = Clock.utcNow ()
+
+            let! list = read ()
+            let value = Assert.Single(list)
+            Assert.Equal((1, "test"), value)
+            return! Error "Something went wrong"
+        }
+        let surroundingEffect () =
+            commitEff {
+                do! insert ()
+                do! deferCommit()
+                let! _now = Clock.utcNow ()
+                return ()
+            }
+        let assertEmpty () =
+            commitEff {
+                let! list = read ()
+
+                Assert.Empty(list)
+                return ()
+            }
+        eff {
+            do!
+                surroundingEffect() 
+                |> Effect.tryRecover (fun es ->
+                    if es = "Something went wrong" then
+                        Ok ()
+                    else
+                        failwith $"Got error %O{es} when expecting error Something went wrong")
+            do! assertEmpty ()
+        }
+        |> run
+
+    [<Fact>]
+    let ``Scope aware effects effect with the surrounding scope`` () =
+        let deferCommit () : EnlistedTransaction<_,_,_> = scopeAware {
+            let! _now = Clock.utcNow ()
+
+            do! insert ()
+            let! _ = RandomNumberGenerator.getBytes [||]
+            return ()
+        }
+
+        commitEff {
+            let! list = read ()
+            Assert.Empty(list)
+            do! deferCommit()
+            let! list = read ()
+            let value = Assert.Single(list)
+            Assert.Equal((1, "test"), value)
+            //todo figure out overload error
+            let! _now = Clock.utcNow ()
+            return ()
+        }
+        |> run
+
+
+    [<Fact>]
+    let ``Each commitEff should have their own transaction`` () =
         let insertAndRead () =
             commitEff {
+                let! list = read ()
+                Assert.True(3 > list.Count)
                 do! insert ()
                 let! list = read ()
                 return list.Count

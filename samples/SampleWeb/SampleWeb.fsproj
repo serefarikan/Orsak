@@ -18,6 +18,7 @@
     <Compile Include="Program.fs" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Azure.Storage.Queues" Version="12.14.0" />
     <PackageReference Include="Dapper" Version="2.0.123" />
     <PackageReference Include="Fleece" Version="0.10.0" />
     <PackageReference Include="Fleece.SystemTextJson" Version="0.10.0" />
@@ -25,7 +26,6 @@
     <PackageReference Include="Giraffe" Version="6.0.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="7.0.4" />
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="7.0.4" />
-    <PackageReference Include="Rebus" Version="7.1.0" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Orsak\Orsak.fsproj" />

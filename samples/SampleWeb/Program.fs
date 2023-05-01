@@ -18,15 +18,12 @@ open Orsak.MinimalApi
 open FSharpPlus
 open FSharpPlus.Control
 open Microsoft.AspNetCore.SignalR
-open Rebus
-open Rebus.Activation
-open Rebus.Bus
-open Rebus.Config
-open Rebus.Routing
-open Rebus.Routing.TypeBased
-open Rebus.Transport.InMem
-open Rebus.Transport
+
+open Azure.Storage.Queues // Namespace for Queue storage types
+open Azure.Storage.Queues.Models // Namespace for PeekedMessage
+
 open SampleWeb.Transactional
+open FSharp.Control
 
 let getService<'t> (app: IApplicationBuilder) =
     app.ApplicationServices.GetService<'t>()
@@ -34,31 +31,47 @@ let getService<'t> (app: IApplicationBuilder) =
 type MainEnv = {
     context: HttpContext
     loggerFactory: ILoggerFactory
+    queueClient: QueueClient
 } with
 
-    interface Orsak.Extensions.IContextProvider with
+    interface IContextProvider with
         member this.Context = this.context
 
-    interface Orsak.Extensions.ILoggerProvider with
+    interface ILoggerProvider with
         member this.Logger s = this.loggerFactory.CreateLogger(s)
 
-    interface Orsak.Scoped.TransactionScopeProvider<DbTransactional> with
+    interface Scoped.TransactionScopeProvider<MessageScope> with
+        member this.BeginScope() = vtask {
+            let! msg = this.queueClient.ReceiveMessageAsync()
+            return MessageScope(this.queueClient, msg.Value)
+        }
+
+    interface Scoped.TransactionScopeProvider<DbTransactional> with
         member this.BeginScope() = Transaction.create()
 
+    interface Scoped.ExceptionHandler<string> with
+        member this.Handle(arg1: exn): string = 
+            raise (System.NotImplementedException())
+
+    interface MessageSink with
+        member this.Send(bytes: byte array): Task<unit> = 
+            task {
+                let! _ = this.queueClient.SendMessageAsync (BinaryData.FromBytes bytes)
+                return ()
+            }
+
+    interface MessageSinkProvider with
+        member this.Sink: MessageSink = this
 
 [<EntryPoint>]
 let main args =
+    let queueCLient = QueueClient("UseDevelopmentStorage=true", "my-ku")
+    let _ = queueCLient.CreateIfNotExists()
+    let x = queueCLient.ReceiveMessages()
+    for message in x.Value do
+        queueCLient.DeleteMessage(message.MessageId, message.PopReceipt) |> ignore
+        ()
     let builder = WebApplication.CreateBuilder(args)
-    use activator = new BuiltinHandlerActivator()
-
-    use bus =
-        Configure
-            .With(activator)
-            .Transport(fun (t: StandardConfigurer<_>) -> t.UseInMemoryTransport(InMemNetwork(), ""))
-            .Routing(fun r -> r.TypeBased().Map<int>("asdasd") |> ignore)
-            .Start()
-
-    let _ = bus.Subscribe<int>()
 
     builder.Services
         .AddSingleton<IChatHubProvider>(fun ctx ->
@@ -87,9 +100,10 @@ let main args =
     let mainEnv ctx = {
         context = ctx
         loggerFactory = loggerFactory
+        queueClient = queueCLient
     }
 
-    app.UseGiraffe(EndpointRouting.webApp mainEnv) |> ignore
+    app.UseRouting().UseGiraffe(EndpointRouting.webApp mainEnv) |> ignore
 
     app.Run()
 

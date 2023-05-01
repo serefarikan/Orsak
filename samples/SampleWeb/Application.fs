@@ -2,6 +2,7 @@
 
 open Orsak
 open Orsak.Extensions
+open Orsak.Extensions.Message
 
 open Fleece
 open Fleece.SystemTextJson
@@ -19,6 +20,9 @@ type Message = {
 
 let ping () : Effect<_, _, _> = eff {
     do! Log.logInformation ("Hi", 1, 2.)
+    let msg = { message = "hi"; batchId = "1"; orderId = "2" }
+    do! Message.send msg
+    let! silly = Message.tmp()
     return ()
 }
 

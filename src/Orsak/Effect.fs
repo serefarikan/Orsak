@@ -201,8 +201,7 @@ module Effect =
     /// Executes effects in parallel if possible.
     /// </summary>
     /// <param name="s">The effects to run in parallel</param>
-    let inline whenAll (s: Effect<'r, 'a, 'e> seq) : Effect<'r, 'a array, 'e> =
-        eff.Run(eff.WhenAll(s))
+    let inline whenAll (s: Effect<'r, 'a, 'e> seq) : Effect<'r, 'a array, 'e> = eff.Run(eff.WhenAll(s))
 
     /// <summary>
     /// Executes effects in parallel if possible.
@@ -212,6 +211,7 @@ module Effect =
         let! _ = whenAll s
         return ()
     }
+
     let inline par (s: Effect<'r, 'a, 'e> seq) = eff {
         let! array = whenAll s
         return List.ofArray array
@@ -219,9 +219,10 @@ module Effect =
 
     ///Traverses an array of effects, turning it in to an effect of an array.
     ///For a more generic implementation, consider FSharpPlus
-    let inline traverse f (effects: Effect<'r, 'a, 'e> array): Effect<'r, 'b array, 'e> = eff {
+    let inline traverse f (effects: Effect<'r, 'a, 'e> array) : Effect<'r, 'b array, 'e> = eff {
         let store = Array.zeroCreate effects.Length
         let mutable i = 0
+
         while i < effects.Length do
             let! result = effects[i]
             store[i] <- f result

@@ -9,12 +9,11 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="BackgroundWorker.fs" />
-    <Compile Include="Models.fs" />
-    <Compile Include="Transactional.fs" />
     <Compile Include="Effects.fs" />
     <Compile Include="Application.fs" />
     <Compile Include="MinimalApi.fs" />
     <Compile Include="EndpointRouting.fs" />
+    <Compile Include="Environments.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
   <ItemGroup>
@@ -22,12 +21,14 @@
     <PackageReference Include="Dapper" Version="2.0.123" />
     <PackageReference Include="Fleece" Version="0.10.0" />
     <PackageReference Include="Fleece.SystemTextJson" Version="0.10.0" />
-    <PackageReference Include="FSharpPlus" Version="1.4.0" />
+    <PackageReference Include="FSharp.Control.TaskSeq" Version="0.3.0" />
+    <PackageReference Include="FSharpPlus" Version="1.4.1" />
     <PackageReference Include="Giraffe" Version="6.0.0" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="7.0.4" />
-    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="7.0.4" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="7.0.5" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="7.0.5" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Orsak\Orsak.fsproj" />
+    <ProjectReference Include="..\ClassLibrary1\ClassLibrary1.csproj" />
   </ItemGroup>
 </Project>

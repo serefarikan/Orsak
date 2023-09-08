@@ -8,6 +8,7 @@ open System.Threading
 open System.Threading.Tasks
 open System.Threading.Channels
 open System
+open FSharp.Control
 
 #nowarn "1204"
 #nowarn "57"
@@ -147,6 +148,49 @@ module BuilderTests =
 
             return i =! 15
         }
+
+    [<Fact>]
+    let ``Builder should support for with CancelableAsyncEnumerable`` () =
+        run
+        <| eff {
+            let chan = Channel.CreateBounded(5)
+
+            for i in 1..5 do
+                chan.Writer.TryWrite i |> ignore
+
+            chan.Writer.Complete()
+
+            let mutable i = 0
+
+            for j in chan.Reader.ReadAllAsync().WithCancellation(CancellationToken.None) do
+                i <- i + j
+
+            return i =! 15
+        }
+
+    [<Fact>]
+    let ``Builder should support while with CancelableAsyncEnumerable`` () =
+        run
+        <| eff {
+            let chan = Channel.CreateBounded(5)
+
+            for i in 1..5 do
+                chan.Writer.TryWrite i |> ignore
+
+            chan.Writer.Complete()
+
+            let mutable i = 0
+            let enumerable = chan.Reader.ReadAllAsync().WithCancellation(CancellationToken.None)
+            use enumerable = enumerable.GetAsyncEnumerator()
+            let move () = vtask { return! enumerable.MoveNextAsync() }
+
+            while (move ()) do
+                let j = enumerable.Current
+                i <- i + j
+
+            return i =! 15
+        }
+
 
     [<Fact>]
     let ``Builder should support while with ValueTask<bool>`` () =
@@ -496,16 +540,13 @@ module BuilderTests =
     [<Fact>]
     let ``repeat 100_000 times`` () =
         let mutable itr = 0
+
         let inlineEffect () = eff {
             itr <- itr + 1
-            if itr = 100_000 then
-                return false
-            else
-                return true
+            if itr = 100_000 then return false else return true
         }
-        inlineEffect ()
-        |> Effect.repeatWhileTrue
-        |> run
+
+        inlineEffect () |> Effect.repeatWhileTrue |> run
 
     [<Fact>]
     let ``bind many results with error`` () =
@@ -595,7 +636,7 @@ module CombinatorTests =
 
     [<Fact>]
     [<Trait("Category", "Par")>]
-    let parCombinatorSumTest () =  task {
+    let parCombinatorSumTest () = task {
         do!
             [
                 eff {
@@ -667,26 +708,16 @@ module CombinatorTests =
     [<Fact>]
     let ``traverse should work`` () = task {
         let! a =
-            [|
-                eff {
-                    return 1 
-                }
-                eff {
-                    return 1 
-                }
-                eff {
-                    return 1 
-                }
-            |]
+            [| eff { return 1 }; eff { return 1 }; eff { return 1 } |]
             |> Effect.traverse float
             |> Effect.map (Array.sum)
             |> Effect.run ()
+
         match a with
         | Ok a ->
             3. =! a
             return ()
-        | Error (e: string) ->
-            return failwith e
+        | Error(e: string) -> return failwith e
     }
 
     [<Fact>]
@@ -741,11 +772,8 @@ module CombinatorTests =
             eff { return! Error "I am error" }
             eff { return failwith "Not expected" }
         |]
-        do!
-            effects
-            |> Effect.sequence
-            |> expectError "I am error"
-            |> run
+
+        do! effects |> Effect.sequence |> expectError "I am error" |> run
     }
 
 module EffSeqTests =

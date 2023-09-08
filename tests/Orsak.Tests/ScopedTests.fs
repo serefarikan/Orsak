@@ -4,7 +4,6 @@ open System
 open System.Security.Cryptography
 open Microsoft.FSharp.NativeInterop
 open System.Runtime.InteropServices
-open Orsak.ScopeAware
 
 //#nowarn "9"
 #nowarn "57"
@@ -14,8 +13,9 @@ open FSharp.Control
 open Microsoft.Data.Sqlite
 
 open Orsak
-open Orsak.Scoped
 open Orsak.Effects
+open Orsak.ScopeAware
+open Orsak.Scoped
 open Xunit
 open Swensen.Unquote
 
@@ -24,36 +24,37 @@ type RNGProvider =
 
 module RandomNumberGenerator =
     let getBytes (x: byte array) =
+
         Effect.Create(fun (provider: #RNGProvider) -> provider.Gen.GetBytes(x))
 
-    //let getInt32 (fromInclusive: Int32) (toExclusive: Int32) =
-    //    Effect.Create(fun (provider: #RNGProvider) ->
-    //        if fromInclusive >= toExclusive then invalidArg "" ""
+//let getInt32 (fromInclusive: Int32) (toExclusive: Int32) =
+//    Effect.Create(fun (provider: #RNGProvider) ->
+//        if fromInclusive >= toExclusive then invalidArg "" ""
 
-    //        let range = uint toExclusive - uint fromInclusive  - 1u
-    //        let mutable mask = range
-    //        if range = 0u then
-    //            fromInclusive
-    //        else
-    //            mask <- mask ||| (mask >>> 1)
-    //            mask <- mask ||| (mask >>> 2)
-    //            mask <- mask ||| (mask >>> 4)
-    //            mask <- mask ||| (mask >>> 8)
-    //            mask <- mask ||| (mask >>> 16)
+//        let range = uint toExclusive - uint fromInclusive  - 1u
+//        let mutable mask = range
+//        if range = 0u then
+//            fromInclusive
+//        else
+//            mask <- mask ||| (mask >>> 1)
+//            mask <- mask ||| (mask >>> 2)
+//            mask <- mask ||| (mask >>> 4)
+//            mask <- mask ||| (mask >>> 8)
+//            mask <- mask ||| (mask >>> 16)
 
-    //            let a = NativePtr.stackalloc<uint> 1 |> NativePtr.toVoidPtr
-    //            let resultSpan = Span<uint>(a, 1)
+//            let a = NativePtr.stackalloc<uint> 1 |> NativePtr.toVoidPtr
+//            let resultSpan = Span<uint>(a, 1)
 
-    //            let mutable result = Unchecked.defaultof<uint>
+//            let mutable result = Unchecked.defaultof<uint>
 
-    //            do provider.Gen.GetBytes(MemoryMarshal.AsBytes resultSpan)
-    //            result <- mask &&& resultSpan[0]
-    //            while result > range do
-    //                do provider.Gen.GetBytes(MemoryMarshal.AsBytes resultSpan)
-    //                result <- mask &&& resultSpan[0]
+//            do provider.Gen.GetBytes(MemoryMarshal.AsBytes resultSpan)
+//            result <- mask &&& resultSpan[0]
+//            while result > range do
+//                do provider.Gen.GetBytes(MemoryMarshal.AsBytes resultSpan)
+//                result <- mask &&& resultSpan[0]
 
-    //            int32 (result + uint fromInclusive)
-    //    )
+//            int32 (result + uint fromInclusive)
+//    )
 
 type IClock =
     abstract member UtcNow: unit -> DateTimeOffset
@@ -78,17 +79,15 @@ type TestProvider() =
             }
 
     interface RNGProvider with
-        member this.Gen: RandomNumberGenerator = 
-            rng
+        member this.Gen: RandomNumberGenerator = rng
 
     interface TransactionScopeProvider<DbTransactional> with
-        member this.BeginScope() =
-            vtask {
-                let conn: DbConnection = new SqliteConnection("Data Source=test.db;Cache=Shared")
-                do! conn.OpenAsync()
-                let! tran = conn.BeginTransactionAsync()
-                return DbTransactional(tran)
-            }
+        member this.BeginScope() = vtask {
+            let conn: DbConnection = new SqliteConnection("Data Source=test.db;Cache=Shared")
+            do! conn.OpenAsync()
+            let! tran = conn.BeginTransactionAsync()
+            return DbTransactional(tran)
+        }
 
 
 
@@ -109,51 +108,81 @@ type Scoped() =
         tran.Commit()
         ()
 
-    //Mostly explores what is possible with this api
-    //all the async usage is wasted with SQLite, but can be valuable with other providers.
-    let read (): Transaction<_, _>  =
-        mkEffect (fun (trans: DbTransactional) ->
-            vtask {
-                let command = trans.Connection.CreateCommand()
-
-                command.CommandText <- "SELECT pkey, data FROM TestData"
-
-                let list = ResizeArray()
-
-                try
-                    use! reader = command.ExecuteReaderAsync()
-
-                    while reader.ReadAsync() do
-                        let id = reader.GetInt32(0)
-                        let data = reader.GetString(1)
-                        list.Add((id, data))
-
-                    return Ok list
-                with e ->
-                    return Error(e.ToString())
-            })
-
-    let insert (): Transaction<unit, _>  =
-        mkEffect (fun (trans: DbTransactional) ->
-            vtask {
-                let command = trans.Connection.CreateCommand()
-
-                command.CommandText <-
-                    """
-                        INSERT INTO TestData (data) VALUES (@data)
-                    """
-
-                let par = command.CreateParameter()
-                par.ParameterName <- "@data"
-                par.Value <- "test"
-                command.Parameters.Add par |> ignore
-                command.ExecuteNonQuery() |> ignore
-                return Ok()
-            })
-
     let scopeAware = ScopeAwareEffectBuilder<DbTransactional>()
 
+    //Mostly explores what is possible with this api
+    //all the async usage is wasted with SQLite, but can be valuable with other providers.
+    let read () : Transaction<_, _> =
+        mkEffect (fun (trans: DbTransactional) -> vtask {
+            let command = trans.Connection.CreateCommand()
 
+            command.CommandText <- "SELECT pkey, data FROM TestData"
+
+            let list = ResizeArray()
+
+            try
+                use! reader = command.ExecuteReaderAsync()
+
+                while reader.ReadAsync() do
+                    let id = reader.GetInt32(0)
+                    let data = reader.GetString(1)
+                    list.Add((id, data))
+
+                return Ok list
+            with e ->
+                return Error(e.ToString())
+        })
+
+
+    let readSingle () = scopeAware {
+        let! _now = Clock.utcNow ()
+
+        let! list = read ()
+        let value = Assert.Single(list)
+        Assert.Equal((1, "test"), value)
+        return ()
+    }
+
+    let readEmpty () = commitEff {
+        let! list = read ()
+        Assert.Empty list
+        return ()
+    }
+
+    let readAndCommit () = commitEff { return! read () }
+
+    let readThenFail () = scopeAware {
+        let! _now = Clock.utcNow ()
+        let! list = read ()
+        let value = Assert.Single(list)
+        Assert.Equal((1, "test"), value)
+        return! Error "Something went wrong"
+    }
+
+    let insert () : Transaction<unit, _> =
+        mkEffect (fun (trans: DbTransactional) -> vtask {
+            let command = trans.Connection.CreateCommand()
+            command.CommandText <- """INSERT INTO TestData (data) VALUES (@data)"""
+            let par = command.CreateParameter()
+            par.ParameterName <- "@data"
+            par.Value <- "test"
+            command.Parameters.Add par |> ignore
+            command.ExecuteNonQuery() |> ignore
+            return Ok()
+        })
+
+    let scopedInsert () = scopeAware {
+        do! insert ()
+        return ()
+    }
+
+    let insertWithError () = commitEff {
+        do! insert ()
+        let! list = read ()
+        let value = Assert.Single(list)
+        Assert.Equal((1, "test"), value)
+        return! Error "expected"
+    }
 
     let run e =
         Effect.runOrFail<TestProvider, _, string> (TestProvider()) e
@@ -166,7 +195,6 @@ type Scoped() =
                 Ok()
             else
                 failwith $"Got error %O{es} when expecting error %O{error}")
-
 
     [<Fact>]
     let ``We can bind a scoped effect and then a regular effect with proper overload resolution`` () =
@@ -184,21 +212,18 @@ type Scoped() =
     let ``We can bind a regular effect and then a scoped effect with proper overload resolution`` () =
         commitEff {
             let! _now = Clock.utcNow ()
-
-
             let! list = read ()
-
             Assert.Empty(list)
             return ()
         }
         |> run
+
     [<Fact>]
     let ``We can interleave effects in a commitEff with proper overload resolution`` () =
         commitEff {
             do! insert ()
             let! _now = Clock.utcNow ()
             let! list = read ()
-
             let value = Assert.Single(list)
             Assert.Equal((1, "test"), value)
             return 1
@@ -208,21 +233,10 @@ type Scoped() =
 
     [<Fact>]
     let ``A failed commitEff does not execute its commit`` () =
-        let insertWithError () =
-            commitEff {
-                do! insert ()
-                let! list = read ()
-                let value = Assert.Single(list)
-                Assert.Equal((1, "test"), value)
-                return! Error "expected"
-            }
-
-        let read () = commitEff { return! read () }
-
         eff {
             do! insertWithError () |> expectError "expected"
 
-            let! list = read ()
+            let! list = readAndCommit ()
 
             Assert.Empty list
             return ()
@@ -243,19 +257,27 @@ type Scoped() =
         |> run
 
     [<Fact>]
-    let ``Scope aware effects read with the surrounding scope`` () =
-        let deferCommit () = scopeAware {
-            let! _now = Clock.utcNow ()
-
-            let! list = read ()
-            let value = Assert.Single(list)
-            Assert.Equal((1, "test"), value)
-            return ()
-        }
+    let ``A failed commitEff rolls back its scope`` () =
 
         commitEff {
+            do! scopedInsert ()
+
+            let! list = read ()
+
+            let value = Assert.Single(list)
+            Assert.Equal((1, "test"), value)
+            return! Error "Error"
+        }
+        |> expectError "Error"
+        |> Effect.bind (readEmpty)
+        |> run
+
+
+    [<Fact>]
+    let ``Scope aware effects read with the surrounding scope`` () =
+        commitEff {
             do! insert ()
-            do! deferCommit()
+            do! readSingle ()
             let! _now = Clock.utcNow ()
             return 1
         }
@@ -263,59 +285,29 @@ type Scoped() =
 
     [<Fact>]
     let ``Scope aware effects can fail the surrounding scope`` () =
-        let deferCommit () = scopeAware {
+        commitEff {
+            do! insert ()
+            do! readThenFail ()
             let! _now = Clock.utcNow ()
-
-            let! list = read ()
-            let value = Assert.Single(list)
-            Assert.Equal((1, "test"), value)
-            return! Error "Something went wrong"
+            return ()
         }
-        let surroundingEffect () =
-            commitEff {
-                do! insert ()
-                do! deferCommit()
-                let! _now = Clock.utcNow ()
-                return ()
-            }
-        let assertEmpty () =
-            commitEff {
-                let! list = read ()
-
-                Assert.Empty(list)
-                return ()
-            }
-        eff {
-            do!
-                surroundingEffect() 
-                |> Effect.tryRecover (fun es ->
-                    if es = "Something went wrong" then
-                        Ok ()
-                    else
-                        failwith $"Got error %O{es} when expecting error Something went wrong")
-            do! assertEmpty ()
-        }
+        |> Effect.tryRecover (fun es ->
+            if es = "Something went wrong" then
+                Ok()
+            else
+                Error $"Got error %O{es} when expecting error Something went wrong")
+        |> Effect.bind readEmpty
         |> run
 
     [<Fact>]
     let ``Scope aware effects effect with the surrounding scope`` () =
-        let deferCommit () : EnlistedTransaction<_,_,_> = scopeAware {
-            let! _now = Clock.utcNow ()
-
-            do! insert ()
-            let! _ = RandomNumberGenerator.getBytes [||]
-            return ()
-        }
-
         commitEff {
             let! list = read ()
             Assert.Empty(list)
-            do! deferCommit()
+            do! scopedInsert ()
             let! list = read ()
             let value = Assert.Single(list)
             Assert.Equal((1, "test"), value)
-            //todo figure out overload error
-            let! _now = Clock.utcNow ()
             return ()
         }
         |> run
@@ -323,14 +315,13 @@ type Scoped() =
 
     [<Fact>]
     let ``Each commitEff should have their own transaction`` () =
-        let insertAndRead () =
-            commitEff {
-                let! list = read ()
-                Assert.True(3 > list.Count)
-                do! insert ()
-                let! list = read ()
-                return list.Count
-            }
+        let insertAndRead () = commitEff {
+            let! list = read ()
+            Assert.True(3 > list.Count)
+            do! insert ()
+            let! list = read ()
+            return list.Count
+        }
 
         eff {
             let! a = insertAndRead ()

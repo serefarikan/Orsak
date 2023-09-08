@@ -1,16 +1,32 @@
 namespace Orsak.Extensions
 
 open System
-open System.Runtime.CompilerServices
-open System.Runtime.InteropServices
 open Orsak
 open Microsoft.Extensions.Logging
 open Microsoft.AspNetCore.Http
 open System.Security.Cryptography
-open Microsoft.AspNetCore.SignalR
 open System.Threading.Tasks
-open System.Globalization
+open System.Text.Json
+open Orsak.Effects
+open FSharp.Control
+open Fleece
+open Fleece.SystemTextJson
+open FSharpPlus
+open Dapper
+open Orsak.Scoped
+open Azure.Storage.Queues.Models
+open System.Collections.Generic
+open System.Threading
 
+type GuidGenerator =
+    abstract member NewGuid: unit -> Guid
+
+type GuidProvider =
+    abstract member Gen: GuidGenerator
+
+module GuidGenerator =
+    let newGuid () =
+        Effect.Create(fun (p: #GuidProvider) -> p.Gen.NewGuid())
 
 type RNGProvider =
     abstract member Gen: RandomNumberGenerator
@@ -34,25 +50,11 @@ type IContextProvider =
     abstract member Context: HttpContext
 
 module HttpContext =
-    open Giraffe
-
     let current () =
         Effect.Create(fun (provider: #IContextProvider) -> provider.Context)
 
 type IChatHub =
     abstract member SendMessage: user: string * message: string -> Task
-
-type ChatHub() =
-    inherit Hub<IChatHub>()
-
-    member this.SendMessage(user, message) =
-        this.Clients.Caller.SendMessage(user, message)
-
-    override this.OnConnectedAsync() =
-        let caller = this.Clients.Caller
-        let user = this.Context.User
-        Task.CompletedTask
-
 
 type IChatHubProvider =
     abstract member Hub: IChatHub
@@ -61,36 +63,15 @@ module ChatHub =
     let sendMessage user message =
         Effect.Create(fun (provider: IChatHubProvider) -> task { do! provider.Hub.SendMessage(user, message) })
 
-
-open Orsak.Scoped
-open Azure.Storage.Queues
-open Azure.Storage.Queues.Models
-
-type MessageScope(queue: QueueClient, msg: QueueMessage) =
-    member val Message = msg
-
-    interface TransactionScope with
-        member this.CommitAsync() : Task = task {
-            let! _ = queue.DeleteMessageAsync(msg.MessageId, msg.PopReceipt)
-            return ()
-        }
-
-        member this.DisposeAsync() : ValueTask = ValueTask.CompletedTask
-
 type MessageSink =
-    abstract member Send: byte[] -> Task<unit>
+    abstract member Send: byte array -> Task<unit>
+    abstract member Receive: CancellationToken -> IAsyncEnumerable<QueueMessage>
+    abstract member Delete: QueueMessage -> Task<unit>
 
 type MessageSinkProvider =
     abstract member Sink: MessageSink
 
 module Message =
-    open System.Text.Json
-    open Orsak.Effects
-    open FSharp.Control
-    open Fleece
-    open Fleece.SystemTextJson
-    open FSharpPlus
-
     type MessageModel = {
         message: string
         batchId: string
@@ -110,16 +91,11 @@ module Message =
               }
             | x -> Decode.Fail.objExpected x
 
-    let inline read () =
-        mkEffect (fun (scope: MessageScope) -> vtask {
-            match
-                JsonDocument.Parse(scope.Message.Body.ToArray()).RootElement
-                |> Encoding.Wrap
-                |> Operators.ofJson
-            with
-            | Ok a -> return Ok a
-            | Error decodeError -> return Error(decodeError.ToString())
-        })
+    let inline receive (token) =
+        Effect.Create(fun (provider: #MessageSinkProvider) -> provider.Sink.Receive(token))
+
+    let delete msg =
+        Effect.Create(fun (provider: #MessageSinkProvider) -> provider.Sink.Delete msg)
 
     ///This is mostly for max control, this can be done in much fewer lines of code if so desired.
     let send (message: MessageModel) =
@@ -133,8 +109,57 @@ module Message =
             do! provider.Sink.Send(result)
         })
 
-    let msgEff = TransactionalEffectBuilder<MessageScope>()
+    let read<'a> (sql: string) (p: obj) =
+        mkEffect (fun (tran: DbTransactional) -> vtask {
+            let connection = tran.Connection
+            let b = connection.QueryFirstOrDefault<'a>(sql, p)
 
-    let tmp () : Effect<_, MessageModel, _> = msgEff { return! read () }
+            match box b with
+            | null -> return Ok None
+            | _ -> return Ok(Some b)
+        })
 
-    let markAsRead (message: MessageModel) = commitEff { return () }
+    let execute (sql: string) (p: obj) =
+        mkEffect (fun (tran: DbTransactional) -> vtask {
+            let connection = tran.Connection
+            let b = connection.Execute(sql, param = p)
+            return Ok()
+        })
+
+
+    let handleMessage (message: MessageModel) = commitEff {
+        match!
+            read<{| handled: string; id: Int64; orderId: string |}>
+                ("SELECT handled, id, orderId FROM inbox where orderId = @orderId")
+                {| orderId = message.orderId |}
+        with
+        | Some a -> do! Log.logInformation $"got duplicate message with id %s{a.orderId}"
+        | None ->
+            //it is possible to do some upsert shenanigans also
+            do! execute "INSERT INTO inbox (orderId) VALUES (@orderId)" {| orderId = message.orderId |}
+
+            ()
+
+        return ()
+    }
+
+    ///There is probably a nicer way of doing this, depending on prefered json library
+    let inline parseAs (bytes: ReadOnlyMemory<byte>) =
+        JsonDocument.Parse(bytes).RootElement
+        |> Encoding.Wrap
+        |> Operators.ofJson
+        |> Result.mapError string
+
+    let msgWork (ct: CancellationToken) = eff {
+        let! subscription = receive (ct)
+        let (a: RequestDelegate) = RequestDelegate(fun ctx -> Task.CompletedTask)
+
+        for msgModel in subscription.WithCancellation(ct) do
+            let! msg = parseAs (BinaryData.op_Implicit msgModel.Body)
+
+            do! Log.logInformation $"Got message %s{msg.message}"
+            do! handleMessage msg
+            do! delete msgModel
+
+        return ()
+    }

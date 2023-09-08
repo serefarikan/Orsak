@@ -28,13 +28,12 @@ let ``the effect is executed again on retry`` () = task {
     Ok() =! result
 }
 
-let my_yield () = eff {
-    do! Task.Yield()
-}
+let my_yield () = eff { do! Task.Yield() }
 
 [<Fact>]
 let ``effects can safely be run multiple times`` () = task {
     let mutable x = 0
+
     let theEffect = eff {
         x <- x + 1
         do! my_yield ()

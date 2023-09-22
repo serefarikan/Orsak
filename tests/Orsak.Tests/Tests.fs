@@ -874,7 +874,7 @@ module CombinatorTests =
             |> run
     }
 
-module EffSeqTests =
+module EffListTests =
     [<Fact>]
     let yieldValuesWorks () =
         effList {

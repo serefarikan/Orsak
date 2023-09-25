@@ -45,20 +45,31 @@ type EffSeq<'r, 'a, 'e> =
                 })
         )
 
-type IEnumeratorStateMachine<'T> =
-    abstract member AwaitUnsafeOnCompleted: byref<#ICriticalNotifyCompletion> -> unit
-    abstract member SetException: exn -> unit
-    abstract member SetCurrent: 'T -> unit
-    abstract member CompleteIteration: isComplete:bool -> unit
-
-[<Struct; NoComparison; NoEquality>]
-type EffSeqStateMachineData<'Env, 'T, 'Err> =
+[<NoComparison; NoEquality>]
+type EffSeqStateMachineData<'Env, 'T, 'Err> () =
     //Environment of the effect
     [<DefaultValue(false)>]
     val mutable Env: 'Env
 
     [<DefaultValue(false)>]
-    val mutable EnumeratorStateMachine: IEnumeratorStateMachine<Result<'T, 'Err>>
+    val mutable EnumeratorStateMachine: IAsyncStateMachine
+
+    //handles our implementation of IValueTaskSource<bool>
+    [<DefaultValue(false)>]
+    val mutable ValueTaskSource: ManualResetValueTaskSourceCore<bool>
+ 
+    member this.AwaitUnsafeOnCompleted(v: byref<#ICriticalNotifyCompletion> ) =
+        this.Current <- ValueNone
+        //let mutable machine = &this.ResumableMachine
+        v.UnsafeOnCompleted(fun () -> this.EnumeratorStateMachine.MoveNext())
+
+    /// allows MoveNextAsync know that we are fully done, and will never move again.
+    [<DefaultValue(false)>]
+    val mutable IsComplete: bool
+
+    /// Used by the AsyncEnumerator interface to return the Current value when
+    [<DefaultValue(false)>]
+    val mutable Current: ValueOption<Result<'T, 'Err>>
 
 and [<Struct; NoComparison; NoEquality>] EffectEnumerable<'Env, 'Machine, 'T, 'Err
     when 'Machine :> IAsyncStateMachine
@@ -82,11 +93,12 @@ and [<Struct; NoComparison; NoEquality>] EffectEnumerable<'Env, 'Machine, 'T, 'E
             let mutable machine = &enumerator.ResumableMachine
             //the machine now has it's own data, and can progress independent of the initial machine
             //we always need to pass it by ref
-            machine.Data <- EffSeqStateMachineData(EnumeratorStateMachine = enumerator, Env = this.Env)
-
+            let mutable data = EffSeqStateMachineData(EnumeratorStateMachine = enumerator, Env = this.Env)
+            machine.Data <- data
+            let mutable src = machine.Data.ValueTaskSource
             enumerator.Registration <-
                 ct.Register(fun () ->
-                    let mutable src = &enumerator.ValueTaskSource
+                    //let mutable machine = &enumerator.ResumableMachine
                     src.SetResult(false))
 
             enumerator
@@ -97,30 +109,12 @@ and [<NoComparison; NoEquality>] EffectEnumerator<'Env, 'Machine, 'T, 'Err
     and 'Machine :> ValueType>() =
 
     //allows external callers to move the enumerator state
-    interface IEnumeratorStateMachine<Result<'T, 'Err>> with
-        member this.SetException(exn) =
-            this.ValueTaskSource.SetException exn
-            this.IsComplete <- true
+    interface IAsyncStateMachine with
+        member this.MoveNext() =
+            let m = &this.ResumableMachine
+            m.MoveNext()
 
-        member this.CompleteIteration(isComplete) =
-            this.IsComplete <- (isComplete)
-
-            //always finish current itteration step if we complete the itteration, else finish it if we have gotten some data
-            if isComplete || this.Current.IsSome then
-                this.ValueTaskSource.SetResult (not isComplete)
-               
-        member this.SetCurrent v =
-            this.Current <- ValueSome v
-
-        member this.AwaitUnsafeOnCompleted(v) =
-            this.Current <- ValueNone
-            //let mutable machine = &this.ResumableMachine
-            v.UnsafeOnCompleted(fun () -> this.MoveNext())
-            //this.Iterator.AwaitUnsafeOnCompleted(&this.NotifyCompletion, &machine)
-
-    member this.MoveNext() =
-        let m = &this.ResumableMachine
-        m.MoveNext()
+        member this.SetStateMachine(_) = () 
 
     [<DefaultValue(false)>]
     val mutable cancellationToken: CancellationToken
@@ -128,61 +122,50 @@ and [<NoComparison; NoEquality>] EffectEnumerator<'Env, 'Machine, 'T, 'Err
     [<DefaultValue(false)>]
     val mutable Registration: CancellationTokenRegistration
 
-    //handles our implementation of IValueTaskSource<bool>
-    [<DefaultValue(false)>]
-    val mutable ValueTaskSource: ManualResetValueTaskSourceCore<bool>
+
     //allows MoveNextAsync()
     interface IValueTaskSource<bool> with
-        member this.GetStatus token = this.ValueTaskSource.GetStatus token
+        member this.GetStatus token = this.ResumableMachine.Data.ValueTaskSource.GetStatus token
 
-        member this.GetResult token = this.ValueTaskSource.GetResult token
+        member this.GetResult token = this.ResumableMachine.Data.ValueTaskSource.GetResult token
 
         member this.OnCompleted(continuation, state, token, flags) =
-            this.ValueTaskSource.OnCompleted(continuation, state, token, flags)
+            this.ResumableMachine.Data.ValueTaskSource.OnCompleted(continuation, state, token, flags)
 
     // the driver of the async flow
     [<DefaultValue(false)>]
     val mutable ResumableMachine: 'Machine
-    //allows external callers do drive the state-machine
+ 
 
-
-    /// allows MoveNextAsync know that we are fully done, and will never move again.
-    [<DefaultValue(false)>]
-    val mutable IsComplete: bool
-
-    /// Used by the AsyncEnumerator interface to return the Current value when
-    /// IAsyncEnumerator.Current is called
-    [<DefaultValue(false)>]
-    val mutable Current: ValueOption<Result<'T, 'Err>>
 
     interface IAsyncEnumerator<Result<'T, 'Err>> with
         member this.Current =
-            match this.Current with
+            match this.ResumableMachine.Data.Current with
             | ValueSome x -> x
             | ValueNone -> Error(Unchecked.defaultof<'Err>)
 
         member this.MoveNextAsync() =
-            this.ValueTaskSource.Reset()
+            this.ResumableMachine.Data.ValueTaskSource.Reset()
             if
                 this.cancellationToken.IsCancellationRequested
-                || this.IsComplete
+                || this.ResumableMachine.Data.IsComplete
                 || this.ResumableMachine.ResumptionPoint = -1
             then
                 ValueTask<_> false
             else
 
-                this.MoveNext()
-                match this.ValueTaskSource.GetStatus(this.ValueTaskSource.Version) with
+                (this :> IAsyncStateMachine) .MoveNext()
+                match this.ResumableMachine.Data.ValueTaskSource.GetStatus(this.ResumableMachine.Data.ValueTaskSource.Version) with
                 | ValueTaskSourceStatus.Succeeded ->
-                    let result = this.ValueTaskSource.GetResult(this.ValueTaskSource.Version)
-                    this.ValueTaskSource.Reset()
+                    let result = this.ResumableMachine.Data.ValueTaskSource.GetResult(this.ResumableMachine.Data.ValueTaskSource.Version)
+                    this.ResumableMachine.Data.ValueTaskSource.Reset()
                     ValueTask.FromResult result
 
                 | ValueTaskSourceStatus.Faulted
                 | ValueTaskSourceStatus.Canceled
                 | ValueTaskSourceStatus.Pending
                 | _ ->
-                    ValueTask<bool>(this, this.ValueTaskSource.Version)
+                    ValueTask<bool>(this, this.ResumableMachine.Data.ValueTaskSource.Version)
 
         member this.DisposeAsync() = this.Registration.DisposeAsync()
 
@@ -198,15 +181,19 @@ type EffSeqBuilder() =
             __stateMachine<EffSeqStateMachineData<'Env, 'T, 'Err>, EffSeq<'Env, 'T, 'Err>>
                 (MoveNextMethodImpl<_>(fun sm ->
                     __resumeAt sm.ResumptionPoint
-
+                    
                     try
                         let __stack_code_fin = code.Invoke(&sm)
+                        sm.Data.IsComplete <- (__stack_code_fin)
 
-                        sm.Data.EnumeratorStateMachine.CompleteIteration(__stack_code_fin)
-
+                        //always finish current itteration step if we complete the itteration, else finish it if we have gotten some data
+                        if __stack_code_fin || sm.Data.Current.IsSome then
+                            sm.Data.ValueTaskSource.SetResult (not __stack_code_fin)
 
                     with exn ->
-                        sm.Data.EnumeratorStateMachine.SetException(exn)))
+                        sm.Data.ValueTaskSource.SetException exn
+                        sm.Data.IsComplete <- true
+                        ))
                 (SetStateMachineMethodImpl<_>(fun _ _ -> ())) // not used in reference impl
                 (AfterCode<_, _>(fun sm ->
                     let mutable ts =
@@ -231,7 +218,7 @@ type EffSeqBuilder() =
     member inline _.Yield(value: 'T) : EffSeqCode<'Env, 'T, 'Err> =
         EffSeqCode<'Env, 'T, 'Err>(fun sm ->
             let __stack_fin = ResumableCode.Yield().Invoke(&sm)
-            sm.Data.EnumeratorStateMachine.SetCurrent(Ok value)            
+            sm.Data.Current <- ValueSome(Ok value)
             __stack_fin)
 
     member inline _.WhileAsync
@@ -259,7 +246,7 @@ type EffSeqBuilder() =
                     if __stack_condition_fin then
                         condition_res <- task.Result
                     else
-                        sm.Data.EnumeratorStateMachine.AwaitUnsafeOnCompleted(&awaiter)
+                        sm.Data.AwaitUnsafeOnCompleted(&awaiter)
 
 
                 if __stack_condition_fin then
@@ -287,7 +274,7 @@ type EffSeqBuilder() =
                     __stack_condition_fin <- __stack_yield_fin
 
                     if not __stack_condition_fin then
-                        sm.Data.EnumeratorStateMachine.AwaitUnsafeOnCompleted(&awaiter)
+                        sm.Data.AwaitUnsafeOnCompleted(&awaiter)
 
                 __stack_condition_fin)
         )
@@ -340,7 +327,7 @@ module LowPrioritySeq =
                     (continuation result).Invoke(&sm)
 
                 else
-                    sm.Data.EnumeratorStateMachine.AwaitUnsafeOnCompleted(&awaiter)
+                    sm.Data.AwaitUnsafeOnCompleted(&awaiter)
                     false)
 
         [<NoEagerConstraintApplication>]
@@ -367,7 +354,7 @@ module LowPrioritySeq =
                             __stack_condition_fin <- __stack_fin2
 
                             if not __stack_condition_fin then
-                                sm.Data.EnumeratorStateMachine.AwaitUnsafeOnCompleted(&awaiter)
+                                sm.Data.AwaitUnsafeOnCompleted(&awaiter)
 
                         __stack_condition_fin
                     else
@@ -458,7 +445,7 @@ module MediumPriority =
                                     match e.Current with
                                     | Ok current -> (body current).Invoke(&sm)
                                     | Error err ->
-                                        sm.Data.EnumeratorStateMachine.SetCurrent(Error err)
+                                        sm.Data.Current <- ValueSome(Error err)
                                         false)
                             )
                     )
@@ -490,11 +477,11 @@ module MediumPriority =
                         match awaiter.GetResult() with
                         | Ok result -> (continuation result).Invoke(&sm)
                         | Error err ->
-                            sm.Data.EnumeratorStateMachine.SetCurrent(Error err)
+                            sm.Data.Current <- ValueSome(Error err)
                             false
 
                     else
-                        sm.Data.EnumeratorStateMachine.AwaitUnsafeOnCompleted(&awaiter)
+                        sm.Data.AwaitUnsafeOnCompleted(&awaiter)
                         false
                 else
                     failwith "lazy")
@@ -519,7 +506,7 @@ module HighPrioritySeq =
                     let result = awaiter.GetResult()
                     (continuation result).Invoke(&sm)
                 else
-                    sm.Data.EnumeratorStateMachine.AwaitUnsafeOnCompleted(&awaiter)
+                    sm.Data.AwaitUnsafeOnCompleted(&awaiter)
                     false)
 
         member inline this.Bind
@@ -538,7 +525,7 @@ module HighPrioritySeq =
                 match result with
                 | Ok ok -> (continuation ok).Invoke(&sm)
                 | Error err ->
-                    sm.Data.EnumeratorStateMachine.SetCurrent(Error err)
+                    sm.Data.Current <- ValueSome(Error err)
                     ResumableCode.Yield().Invoke(&sm))
 
     type EffBuilderBase with
